@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: '2010-09-09'
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+Description: 'DevOps Agent Workshop - EventBridge to ServiceNow Automation'
+
+Parameters:
+  SnowInstance:
+    Type: String
+  SnowUsername:
+    Type: String
+  SnowPassword:
+    Type: String
+    NoEcho: true
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: DevOpsDemo-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  SnowIncidentCreator:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DevOpsDemo-snow-incident-creator
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          SNOW_INSTANCE: !Ref SnowInstance
+          SNOW_USERNAME: !Ref SnowUsername
+          SNOW_PASSWORD: !Ref SnowPassword
+      Code:
+        ZipFile: |
+          import json, urllib.request, os, base64
+
+          def lambda_handler(event, context):
+              detail = event.get('detail', {})
+              alarm_name = detail.get('alarmName', 'Unknown')
+              new_state = detail.get('state', {}).get('value', '')
+              reason = detail.get('state', {}).get('reason', '')
+              metrics = detail.get('configuration', {}).get('metrics', [{}])
+              dimensions = metrics[0].get('metricStat', {}).get('metric', {}).get('dimensions', {})
+              instance_id = dimensions.get('InstanceId', 'Unknown')
+
+              if new_state != 'ALARM':
+                  return {'statusCode': 200, 'body': 'Skipped'}
+
+              incident = {
+                  'short_description': f"AWS CloudWatch Alarm: {alarm_name}",
+                  'description': f"Alarm: {alarm_name}\nInstance: {instance_id}\nRegion: {event.get('region','')}\nReason: {reason}",
+                  'urgency': '2', 'impact': '2', 'category': 'software',
+                  'caller_id': 'admin', 'assignment_group': 'Operations'
+              }
+
+              snow_instance = os.environ['SNOW_INSTANCE']
+              credentials = base64.b64encode(
+                  f"{os.environ['SNOW_USERNAME']}:{os.environ['SNOW_PASSWORD']}".encode()
+              ).decode()
+
+              req = urllib.request.Request(
+                  f"https://{snow_instance}/api/now/table/incident",
+                  data=json.dumps(incident).encode(),
+                  headers={'Content-Type': 'application/json', 'Accept': 'application/json',
+                           'Authorization': f'Basic {credentials}'},
+                  method='POST'
+              )
+              with urllib.request.urlopen(req) as r:
+                  result = json.loads(r.read().decode())
+                  print(f"Created: {result['result']['number']}")
+              return {'statusCode': 200}
+
+  LambdaEventBridgePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: CloudWatchAlarmRule
+    Properties:
+      FunctionName: !Ref SnowIncidentCreator
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CloudWatchAlarmRule.Arn
+
+  CloudWatchAlarmRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: DevOpsDemo-ec2-alarm-to-snow
+      Description: Catches any CloudWatch alarm and creates ServiceNow incident
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - CloudWatch Alarm State Change
+        detail:
+          state:
+            value:
+              - ALARM
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SnowIncidentCreator.Arn
+          Id: SnowIncidentCreatorTarget
+
+Outputs:
+  LambdaFunctionName:
+    Value: !Ref SnowIncidentCreator
+  EventBridgeRuleName:
+    Value: !Ref CloudWatchAlarmRule
