@@ -1,0 +1,30 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+name: Cleanup All Resources
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Delete automation stack
+        run: |
+          aws cloudformation delete-stack --stack-name devops-agent-snow-automation
+          aws cloudformation wait stack-delete-complete --stack-name devops-agent-snow-automation || true
+
+      - name: Delete EC2 stack
+        run: |
+          aws cloudformation delete-stack --stack-name devops-agent-ec2-test
+          aws cloudformation wait stack-delete-complete --stack-name devops-agent-ec2-test || true
