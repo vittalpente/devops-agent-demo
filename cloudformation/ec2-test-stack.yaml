@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: '2010-09-09'
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+Description: 'DevOps Agent Workshop - EC2 CPU Test Stack'
+
+Resources:
+  TestSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: DevOpsDemo-test-sg
+      GroupDescription: DevOps Agent workshop security group
+      Tags:
+        - Key: Name
+          Value: DevOpsDemo-Test-SG
+
+  TestInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: DevOpsDemo-test-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: DevOpsDemo-Test-Role
+
+  TestInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: DevOpsDemo-test-profile
+      Roles:
+        - !Ref TestInstanceRole
+
+  TestInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}'
+      IamInstanceProfile: !Ref TestInstanceProfile
+      SecurityGroupIds:
+        - !Ref TestSecurityGroup
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          cat > /home/ec2-user/cpu-stress-test.sh << 'EOF'
+          #!/bin/bash
+          CORES=$(nproc)
+          for i in $(seq 1 $CORES); do
+              (yes > /dev/null) &
+              echo $! >> /tmp/cpu_pids
+          done
+          (sleep 300 && kill $(cat /tmp/cpu_pids 2>/dev/null) 2>/dev/null) &
+          echo "CPU stress test started for 5 minutes"
+          EOF
+          chmod +x /home/ec2-user/cpu-stress-test.sh
+          chown ec2-user:ec2-user /home/ec2-user/cpu-stress-test.sh
+          (sleep 7200 && shutdown -h now) &
+      Tags:
+        - Key: Name
+          Value: DevOpsDemo-Test-Instance
+
+  CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: DevOpsDemo-EC2-CPU-Test
+      AlarmDescription: DevOps Agent workshop - EC2 CPU alarm
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref TestInstance
+      TreatMissingData: notBreaching
+
+Outputs:
+  InstanceId:
+    Value: !Ref TestInstance
+  AlarmName:
+    Value: !Ref CPUAlarm
